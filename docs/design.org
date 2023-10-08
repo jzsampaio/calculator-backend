@@ -1,0 +1,215 @@
+#+TITLE: Design Document for Truenorth Calculator Backend
+
+This document contains notes and sketches of a system build for
+TRUENORTH. In summary, the system is expected to:
+
+- perform a few basic arithmetic operations, each with an associate
+  cost
+- be accessed through a HTTP API
+- keep track of API usage per user
+- keep track of a user balance
+- answer only to registered users and with enough balance
+- provide a report of API usage with filtering capabilities
+- the HTTP API should be versioned
+- be automatically tested
+- store all data ever entered into the system
+* The HTTP API
+** Draft of Schema
+
+| Action         | Verb   | Path                        | Arguments                                    | Returns            | Authorized? |
+|----------------+--------+-----------------------------+----------------------------------------------+--------------------+-------------|
+| Login          | POST   | /api/v<X>/session           | username: string, password: string           | session-id: string |             |
+| Logout         | DELETE | /api/v<X>/session           | session-id: string                           | nil                | X           |
+| Who am i?      | GET    | /api/v<X>/whoami            |                                              | username           | X           |
+| Addition       | POST   | /api/v<X>/add               | args: number-string[]                        | number-string      | X           |
+| Subtraction    | POST   | /api/v<X>/sub               | args: number-string[]                        | number-string      | X           |
+| Multiplication | POST   | /api/v<X>/mult              | args: number-string[]                        | number-string      | X           |
+| Division       | POST   | /api/v<X>/div               | d: number-string, n: number-string           | number-string      | X           |
+| Square Root    | POST   | /api/v<X>/sqr               | x: number-string                             | number-string      | X           |
+| Random String  | POST   | /api/v<X>/rnd               |                                              | string             | X           |
+| Fund           | POST   | /api/v<X>/balance           | userEmail: email, amount: int                | string             | ADMIN       |
+| Usage report   | GET    | /api/v<X>/usage             | filter: string?, page: int?, page-size: int? | UsageRecord[]      | X           |
+| Delete record  | DELETE | /api/v<X>/usage/<record-id> |                                              |                    | X           |
+
+** API versioning
+
+The first version of the API will be on prefix ~/api/v1/~.
+
+The demo app will include two APIs: v1 and v2. V2 is exactly the same
+as v1, except that random string generation uses an external provider,
+and numbers are read as json floats.
+
+** Authentication
+
+Authentication will be done with a bearer token.
+
+The token is issued on login via ~POST /api/session~, which returns a token.
+
+For starter, the signed JWT token contains the following schema:
+
+#+begin_src javascript
+{ sessionId: string }
+#+end_src
+
+The token is then exchanged with the http ~Authorization: BEARER~.
+
+Logout is done with ~DELETE /api/session~.
+
+The server will (soft) delete the session from its records. Further
+attempts to authenticate with an invalidated token will fail.
+
+** The type "number-string"
+
+In order to avoid problems of floating point representation, and to
+highlight concern with numeric precision, numbers will be transferred
+as strings.
+
+The system will have a definition of the expected format. The decimal
+digit will be optional, but if present, a fixed number of decimal
+cases will be considered. More numbers than informed will produce
+parsing error.
+
+** UsageRecord
+
+| Field       | Description                |
+|-------------+----------------------------|
+| Id          | Identifier for this record |
+| OperationId |                            |
+| UserId      |                            |
+| Amount      |                            |
+| UserBalance |                            |
+| Response    |                            |
+| Date        |                            |
+
+* The System State
+** Persistent Backend Storage
+
+The backend system will store its data on Postgresql.
+
+Data will be stored in immutable fashion. Which will be implemented as
+follows:
+
+- For all time-variable relations, we will keep two versions: the
+  current value of the relation, and a history table
+- The history table includes the fields "start" and "end"
+- The current state includes the field "since"
+- The implementation will make use of the postgresql extension
+  "periods" for managing the historical view of the database.
+
+The following relations will be used:
+
+- Users
+    * email (encrypted)
+    * id: guid
+- LoginSessions
+    * id: guid
+    * userId: guid
+    * loggedInAt: timestamp
+- Operation
+    * opCode: int
+    * opName: string
+    * opCost: int
+- UserBalance
+    * userId: guid
+    * balance: int
+- UsageRecord
+    * userId: guid
+    * opCode: int
+    * opCost: int
+    * balanceBefore: int
+    * balanceAfter: int
+    * response: json
+    * date: timestamp
+    * sessionId: guid
+
+** Client state
+
+The client will maintain:
+
+- authorization token: string?
+- current page
+
+* The System Dynamics
+** Updates to Balance
+** Concurrency Control
+
+Operations that alter the balance of the user will:
+
+- start a transaction
+- lock the user's balance
+- compute
+- write response to database
+- deduce the balance
+- commit
+- return to the user
+
+* Deployment
+
+The demo system will be deployed on digital ocean.
+
+I will hire a VM, log into it, and start the service. This service
+will delivery both the API, and the static page.
+
+An NGINX will be configured to redirect data to the service.
+
+A free HTTPs certificate will be used.
+
+The VM will also start postgresql.
+
+* Security Concerns
+
+** Credentials
+
+Credentials to the system include:
+
+- database conn parameters
+- encryption key
+- password salt for hashing
+
+
+* Other Concerns
+
+** Decoupling
+
+*** It should be easy to change
+
+The following items should be easy to change:
+
+- the provider of random strings
+- the provider of secrets for run-time
+
+*** It won't be easy to change
+
+The techonology used for accesing the database. As much as possible,
+responsibility will be delegated to the specific relational databased
+used on this project. This is intentionally done in order to avoid
+re-implementing on the application level concerns which are very well
+implemented on Postgresql.
+
+** Logging
+
+All logs related to a particular user call should include a correlation ID.
+
+Production logs will be in JSON format. They will be logged to
+standard output, and to a file with rolling updates.
+
+** Error handling
+
+The application will favor monadic error handling.
+
+Functions which potentially return error will return the Maybe
+monad. Left indicates error, and right indicates success.
+
+All errors (left value) should be created with calls to an error
+namespace, which specifies all application errors (keywords). Module
+level details (with module specific named keywords) should go as
+"details".
+
+** Type annotation
+
+Malli will be used to parse the data:
+
+- at the input of the http layer
+- at the database
+
+Intermediary functions won't be annotated.
